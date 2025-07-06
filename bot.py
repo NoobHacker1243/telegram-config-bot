@@ -2,7 +2,7 @@ import os
 import json
 import random
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Document, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Document
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
@@ -18,7 +18,7 @@ PRICE_FILE = "prices.json"
 CATEGORIES = ["free", "paid", "vip"]
 DEFAULT_PRICES = {"paid": 50000, "vip": 100000}
 
-# ساخت پوشه و فایل قیمت
+# ساخت پوشه‌ها و فایل قیمت در صورت نیاز
 for cat in CATEGORIES:
     os.makedirs(os.path.join(BASE_DIR, cat), exist_ok=True)
 if not os.path.exists(PRICE_FILE):
@@ -29,6 +29,7 @@ with open(PRICE_FILE) as f:
 
 # متغیرهای موقتی
 admin_pending_files = {}
+pending_payments = {}  # ذخیره رسید پرداخت (عکس) کاربر
 admin_waiting_for_price = False
 
 # منوی اصلی
@@ -52,7 +53,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_menu(is_admin)
     )
 
-# وقتی ادمین فایل بفرسته
+# دریافت فایل از ادمین
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id != ADMIN_ID:
@@ -92,7 +93,7 @@ async def save_file_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.edit_message_text(f"✅ فایل در دسته {category.upper()} ذخیره شد.")
 
-# پرداخت دستی
+# نمایش اطلاعات پرداخت
 async def show_payment_info(update: Update, context: ContextTypes.DEFAULT_TYPE, category: str):
     price = prices.get(category, 0)
     message = (
@@ -100,11 +101,11 @@ async def show_payment_info(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         f"🏷 مبلغ: {price:,} تومان\n"
         f"💳 شماره کارت: 6037-9918-1234-5678\n"
         f"👤 به نام: علی رضایی\n\n"
-        f"📩 رسید رو بفرست برای ادمین تا فعال بشه."
+        f"📩 لطفاً رسید پرداخت رو به صورت عکس بفرست تا بررسی کنیم."
     )
     await update.callback_query.message.reply_text(message)
 
-# ارسال فایل تصادفی
+# ارسال فایل تصادفی از یک دسته
 async def send_random_from_category(update: Update, context: ContextTypes.DEFAULT_TYPE, category: str):
     files = os.listdir(os.path.join(BASE_DIR, category))
     if not files:
@@ -112,7 +113,9 @@ async def send_random_from_category(update: Update, context: ContextTypes.DEFAUL
         return
 
     user_id = update.callback_query.from_user.id
+
     if category == "free":
+        # چک عضویت کانال برای فایل رایگان
         try:
             member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
             if member.status in ['left', 'kicked']:
@@ -121,17 +124,19 @@ async def send_random_from_category(update: Update, context: ContextTypes.DEFAUL
             await update.callback_query.message.reply_text(
                 "❗️برای فایل رایگان باید عضو کانال باشی 👇",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔗 عضویت در کانال", url=f"https://t.me/{CHANNEL_USERNAME.strip('@')}")]
+                    [InlineKeyboardButton("🔗 عضویت در کانال", url=f"https://t.me/{CHANNEL_USERNAME.strip('@')}")],
+                    [InlineKeyboardButton("✅ عضو شدم", callback_data="check_membership")]
                 ])
             )
             return
-    elif category in ["paid", "vip"]:
-        await show_payment_info(update, context, category)
-        return
 
-    selected = random.choice(files)
-    file_path = os.path.join(BASE_DIR, category, selected)
-    await update.callback_query.message.reply_document(open(file_path, "rb"))
+        selected = random.choice(files)
+        file_path = os.path.join(BASE_DIR, category, selected)
+        await update.callback_query.message.reply_document(open(file_path, "rb"))
+
+    elif category in ["paid", "vip"]:
+        # نمایش راهنمای پرداخت
+        await show_payment_info(update, context, category)
 
 # دکمه‌ها
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,20 +147,44 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("save_"):
         await save_file_category(update, context)
+
     elif data.startswith("get_"):
         category = data.replace("get_", "")
         await send_random_from_category(update, context, category)
+
     elif data == "about":
         await query.answer()
         await query.message.reply_text("🤖 ربات فروش کانفیگ ساخته شده توسط ممد\n📢 کانال: https://t.me/V2File_Mamad")
+
     elif data == "set_price" and user_id == ADMIN_ID:
         admin_waiting_for_price = True
         await query.message.reply_text("💬 قیمت رو وارد کن:\nمثال:\n`paid:45000`\nیا\n`vip:90000`", parse_mode='Markdown')
+
+    elif data == "check_membership":
+        # بررسی عضویت در کانال برای دکمه "عضو شدم"
+        try:
+            member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
+            if member.status not in ['left', 'kicked']:
+                await query.edit_message_text("✅ عضویت شما تایید شد. فایل رایگان ارسال می‌شود.")
+                # ارسال فایل رایگان
+                files = os.listdir(os.path.join(BASE_DIR, "free"))
+                if files:
+                    selected = random.choice(files)
+                    file_path = os.path.join(BASE_DIR, "free", selected)
+                    await context.bot.send_document(chat_id=user_id, document=open(file_path, "rb"))
+                else:
+                    await context.bot.send_message(chat_id=user_id, text="❌ فعلاً فایلی تو دسته رایگان نیست.")
+            else:
+                await query.answer("❌ شما هنوز عضو کانال نیستید!", show_alert=True)
+        except:
+            await query.answer("❌ خطا در بررسی عضویت!", show_alert=True)
 
 # پیام متنی (تنظیم قیمت)
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global admin_waiting_for_price
     user_id = update.message.from_user.id
+
+    # تنظیم قیمت توسط ادمین
     if admin_waiting_for_price and user_id == ADMIN_ID:
         try:
             key, val = update.message.text.strip().split(":")
@@ -171,30 +200,92 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text("❌ فرمت اشتباهه. مثل این بنویس:\n`vip:75000`", parse_mode='Markdown')
         admin_waiting_for_price = False
+        return
+
+    # دریافت رسید پرداخت (عکس) برای فایل پولی و VIP
+    if update.message.photo:
+        # ذخیره رسید پرداخت به همراه آیدی کاربر در متغیر pending_payments
+        pending_payments[user_id] = update.message.photo[-1].file_id
+        # ارسال رسید به ادمین
+        await context.bot.send_photo(chat_id=ADMIN_ID,
+            photo=update.message.photo[-1].file_id,
+            caption=f"💳 رسید پرداخت از کاربر: {user_id}\nلطفاً تایید یا رد کنید.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تایید", callback_data=f"approve_{user_id}")],
+                [InlineKeyboardButton("❌ رد", callback_data=f"reject_{user_id}")]
+            ])
+        )
+        await update.message.reply_text("رسید پرداخت ارسال شد، منتظر تایید ادمین باشید.")
+        return
+
+# تایید یا رد پرداخت توسط ادمین
+async def handle_approve_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    user_id = query.from_user.id
+
+    if user_id != ADMIN_ID:
+        await query.answer("⛔️ فقط ادمین می‌تواند اقدام کند.", show_alert=True)
+        return
+
+    if data.startswith("approve_"):
+        buyer_id = int(data.split("_")[1])
+        if buyer_id in pending_payments:
+            # ارسال فایل پولی یا VIP به کاربر
+            # برای سادگی اینجا فرض میکنیم پولی هست، میشه با ساختار بهتر دسته بندی کرد
+            files = []
+            # چک میکنیم کدام دسته مورد نظر بوده (برای ساده سازی فقط پولی می‌فرستیم)
+            files = os.listdir(os.path.join(BASE_DIR, "paid"))
+            if not files:
+                await query.edit_message_text("❌ فایل پولی موجود نیست.")
+                return
+            selected = random.choice(files)
+            file_path = os.path.join(BASE_DIR, "paid", selected)
+            await context.bot.send_document(chat_id=buyer_id, document=open(file_path, "rb"))
+            await query.edit_message_text(f"✅ پرداخت تایید شد و فایل برای کاربر {buyer_id} ارسال شد.")
+            # حذف رسید پرداخت از لیست
+            del pending_payments[buyer_id]
+        else:
+            await query.edit_message_text("❌ این کاربر رسید پرداخت ارسال نکرده.")
+    elif data.startswith("reject_"):
+        buyer_id = int(data.split("_")[1])
+        if buyer_id in pending_payments:
+            await query.edit_message_text(f"❌ پرداخت کاربر {buyer_id} رد شد.")
+            del pending_payments[buyer_id]
+        else:
+            await query.edit_message_text("❌ این کاربر رسید پرداخت ارسال نکرده.")
 
 # دستور ناشناس
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⛔️ دستور ناشناخته!")
 
-# تابع پینگ هر ۵ دقیقه یکبار
-async def ping_loop(bot: Bot):
+# پینگ هر ۵ دقیقه برای جلوگیری از خاموشی
+async def ping_loop(application):
     while True:
-        await bot.send_message(chat_id=ADMIN_ID, text="⏰ پینگ ربات! هنوز روشنم :)")
-        await asyncio.sleep(300)  # 300 ثانیه = 5 دقیقه
+        try:
+            await application.bot.get_me()
+            # print("Pinged bot to keep alive")
+        except Exception as e:
+            print(f"Ping error: {e}")
+        await asyncio.sleep(300)  # ۵ دقیقه
 
 # اجرای ربات
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    bot = app.bot
-    asyncio.create_task(ping_loop(bot))  # اجرای همزمان پینگ
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_text))
     app.add_handler(CallbackQueryHandler(handle_buttons))
+    app.add_handler(CallbackQueryHandler(handle_approve_reject, pattern="^(approve_|reject_).*"))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("🤖 ربات آماده اجراست...")
-    await app.run_polling()
+    # شروع همزمان پینگ و ربات
+    await asyncio.gather(
+        app.run_polling(),
+        ping_loop(app)
+    )
 
 if __name__ == "__main__":
     import asyncio
